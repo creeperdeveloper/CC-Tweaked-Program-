@@ -2,6 +2,7 @@ local CONFIG_FILE = "redstone_communications.cfg"
 
 local CHANNEL = 48173
 local PROTOCOL = "Redstone Communications"
+local VERSION = 1
 
 local SIDES = {
     "top",
@@ -10,12 +11,6 @@ local SIDES = {
     "right",
     "front",
     "back"
-}
-
-local config = {
-    key = "",
-    input = "top",
-    output = "bottom"
 }
 
 local modem = peripheral.find("modem")
@@ -33,76 +28,67 @@ if not modem then
     print("No modem found.")
     print("")
     print("Connect a modem and restart.")
+
     return
 end
 
+local COMPUTER_ID = os.getComputerID()
+
+local config = {
+    key = "",
+    routes = {
+        top = {},
+        bottom = {},
+        left = {},
+        right = {},
+        front = {},
+        back = {}
+    }
+}
+
+local workingConfig = nil
+
 local running = true
 local configOpen = false
-local selected = 1
+
+local remoteStates = {}
+
+local localStates = {}
+
+local outputStates = {}
+
+local mainSelection = 1
+local configSelection = 1
+local outputSelection = 1
+
+local configItems = {
+    "KEY",
+    "ROUTES",
+    "SAVE",
+    "RESET",
+    "CANCEL"
+}
 
 --------------------------------------------------
--- CONFIG
+-- BASIC
 --------------------------------------------------
 
-local function saveConfig()
-    local file = fs.open(CONFIG_FILE, "w")
-
-    if file then
-        file.write(textutils.serialize(config))
-        file.close()
-    end
+local function copyTable(value)
+    local serialized = textutils.serialize(value)
+    return textutils.unserialize(serialized)
 end
 
-local function loadConfig()
-    if not fs.exists(CONFIG_FILE) then
-        saveConfig()
-        return
-    end
-
-    local file = fs.open(CONFIG_FILE, "r")
-
-    if not file then
-        return
-    end
-
-    local data = file.readAll()
-    file.close()
-
-    local ok, result = pcall(textutils.unserialize, data)
-
-    if ok and type(result) == "table" then
-
-        if type(result.key) == "string" then
-            config.key = result.key
-        end
-
-        if type(result.input) == "string" then
-            config.input = result.input
-        end
-
-        if type(result.output) == "string" then
-            config.output = result.output
+local function sideExists(side)
+    for i = 1, #SIDES do
+        if SIDES[i] == side then
+            return true
         end
     end
 
-    if config.input == config.output then
-        config.output = "bottom"
-
-        if config.input == config.output then
-            config.input = "top"
-        end
-    end
+    return false
 end
 
-local function resetConfig()
-    config.key = ""
-    config.input = "top"
-    config.output = "bottom"
-
-    saveConfig()
-end
-
-local function sideIndex(side)
+local function getSideIndex(side)
     for i = 1, #SIDES do
         if SIDES[i] == side then
             return i
@@ -112,11 +98,126 @@ local function sideIndex(side)
     return 1
 end
 
+local function nextSide(side, direction)
+    local index = getSideIndex(side)
+
+    index = index + direction
+
+    if index > #SIDES then
+        index = 1
+    end
+
+    if index < 1 then
+        index = #SIDES
+    end
+
+    return SIDES[index]
+end
+
+local function normalizeConfig()
+    if type(config) ~= "table" then
+        config = {}
+    end
+
+    if type(config.key) ~= "string" then
+        config.key = ""
+    end
+
+    if type(config.routes) ~= "table" then
+        config.routes = {}
+    end
+
+    for i = 1, #SIDES do
+        local input = SIDES[i]
+
+        if type(config.routes[input]) ~= "table" then
+            config.routes[input] = {}
+        end
+
+        local clean = {}
+
+        for j = 1, #SIDES do
+            local output = SIDES[j]
+
+            if output ~= input
+            and config.routes[input][output] == true then
+                clean[output] = true
+            end
+        end
+
+        config.routes[input] = clean
+    end
+end
+
 --------------------------------------------------
--- TERMINAL
+-- SAVE / LOAD
 --------------------------------------------------
 
-local function screenSize()
+local function saveConfig()
+    normalizeConfig()
+
+    local file = fs.open(CONFIG_FILE, "w")
+
+    if not file then
+        return false
+    end
+
+    file.write(textutils.serialize({
+        version = VERSION,
+        key = config.key,
+        routes = config.routes
+    }))
+
+    file.close()
+
+    return true
+end
+
+local function loadConfig()
+    if not fs.exists(CONFIG_FILE) then
+        normalizeConfig()
+        saveConfig()
+        return
+    end
+
+    local file = fs.open(CONFIG_FILE, "r")
+
+    if not file then
+        normalizeConfig()
+        return
+    end
+
+    local data = file.readAll()
+    file.close()
+
+    local ok, result = pcall(textutils.unserialize, data)
+
+    if ok and type(result) == "table" then
+        config = result
+    end
+
+    normalizeConfig()
+end
+
+local function resetConfig()
+    config = {
+        key = "",
+        routes = {
+            top = {},
+            bottom = {},
+            left = {},
+            right = {},
+            front = {},
+            back = {}
+        }
+    }
+end
+
+--------------------------------------------------
+-- SCREEN
+--------------------------------------------------
+
+local function getScreenSize()
     local w, h = term.getSize()
 
     if type(w) ~= "number" then
@@ -139,23 +240,13 @@ local function clearScreen()
 end
 
 local function center(y, text, color)
-    local w, h = screenSize()
+    local w, h = getScreenSize()
 
-    if type(y) ~= "number" then
+    if y < 1 or y > h then
         return
     end
 
-    if type(text) ~= "string" then
-        text = tostring(text or "")
-    end
-
-    if y < 1 then
-        y = 1
-    end
-
-    if y > h then
-        y = h
-    end
+    text = tostring(text or "")
 
     if #text > w then
         text = string.sub(text, 1, w)
@@ -167,33 +258,40 @@ local function center(y, text, color)
         x = 1
     end
 
-    if x > w then
-        x = w
-    end
-
     term.setCursorPos(x, y)
     term.setTextColor(color or colors.white)
+    term.setBackgroundColor(colors.black)
     term.write(text)
 end
 
-local function line(y, color)
-    local w, h = screenSize()
+local function separator(y)
+    local w, h = getScreenSize()
 
-    local length = w - 8
+    if y < 1 or y > h then
+        return
+    end
+
+    local length = math.min(w - 6, 42)
 
     if length < 1 then
         length = 1
     end
 
-    term.setTextColor(color or colors.gray)
-    term.setCursorPos(1, y)
+    local x = math.floor((w - length) / 2) + 1
+
+    term.setCursorPos(x, y)
+    term.setTextColor(colors.gray)
     term.write(string.rep("-", length))
 end
 
-local function box(y, text, selected)
-    local w, h = screenSize()
+local function menuLine(y, text, selected)
+    local w, h = getScreenSize()
 
-    local width = math.min(40, w - 6)
+    if y < 1 or y > h then
+        return
+    end
+
+    local width = math.min(42, w - 6)
 
     if width < 10 then
         width = w - 2
@@ -212,68 +310,16 @@ local function box(y, text, selected)
     term.setCursorPos(x, y)
     term.write(string.rep(" ", width))
 
-    local output = text
+    local value = text
 
-    if #output > width - 2 then
-        output = string.sub(output, 1, width - 2)
+    if #value > width - 2 then
+        value = string.sub(value, 1, width - 2)
     end
 
     term.setCursorPos(x + 1, y)
-    term.write(output)
+    term.write(value)
 
     term.setBackgroundColor(colors.black)
-end
-
---------------------------------------------------
--- SIDE SELECTION
---------------------------------------------------
-
-local function changeInput(direction)
-    local index = sideIndex(config.input)
-
-    for i = 1, #SIDES do
-        index = index + direction
-
-        if index > #SIDES then
-            index = 1
-        end
-
-        if index < 1 then
-            index = #SIDES
-        end
-
-        local candidate = SIDES[index]
-
-        if candidate ~= config.output then
-            config.input = candidate
-            saveConfig()
-            return
-        end
-    end
-end
-
-local function changeOutput(direction)
-    local index = sideIndex(config.output)
-
-    for i = 1, #SIDES do
-        index = index + direction
-
-        if index > #SIDES then
-            index = 1
-        end
-
-        if index < 1 then
-            index = #SIDES
-        end
-
-        local candidate = SIDES[index]
-
-        if candidate ~= config.input then
-            config.output = candidate
-            saveConfig()
-            return
-        end
-    end
 end
 
 --------------------------------------------------
@@ -283,16 +329,16 @@ end
 local function keyInputScreen()
     clearScreen()
 
-    local w, h = screenSize()
+    local w, h = getScreenSize()
 
     center(3, "COMMUNICATION KEY", colors.white)
-    center(4, "ENTER A SHARED KEY", colors.gray)
+    center(4, "ENTER SHARED KEY", colors.gray)
 
-    line(6, colors.gray)
+    separator(6)
 
-    local width = math.min(36, w - 6)
+    local width = math.min(38, w - 6)
 
-    if width < 10 then
+    if width < 12 then
         width = w - 2
     end
 
@@ -304,19 +350,23 @@ local function keyInputScreen()
     term.setCursorPos(x, 8)
     term.write(string.rep(" ", width))
 
+    local value = workingConfig.key or ""
+
+    if #value > width - 2 then
+        value = string.sub(value, 1, width - 2)
+    end
+
     term.setCursorPos(x + 1, 8)
-    term.setCursorBlink(true)
-
-    local value = config.key
-
     term.write(value)
 
+    term.setCursorBlink(true)
+
     while true do
-        local event, a = os.pullEvent()
+        local event, valueOrKey = os.pullEvent()
 
         if event == "char" then
             if #value < width - 2 then
-                value = value .. a
+                value = value .. valueOrKey
 
                 term.setCursorPos(x + 1, 8)
                 term.write(string.rep(" ", width - 2))
@@ -326,8 +376,7 @@ local function keyInputScreen()
             end
 
         elseif event == "key" then
-
-            if a == keys.backspace then
+            if valueOrKey == keys.backspace then
                 if #value > 0 then
                     value = string.sub(value, 1, #value - 1)
 
@@ -338,175 +387,383 @@ local function keyInputScreen()
                     term.write(value)
                 end
 
-            elseif a == keys.enter then
-                config.key = value
-                saveConfig()
+            elseif valueOrKey == keys.enter then
+                workingConfig.key = value
 
                 term.setCursorBlink(false)
 
-                return
+                return true
 
-            elseif a == keys.escape then
+            elseif valueOrKey == keys.escape then
                 term.setCursorBlink(false)
 
-                return
+                return false
             end
         end
     end
 end
 
 --------------------------------------------------
--- CONFIGURATION UI
+-- OUTPUT SCREEN
 --------------------------------------------------
 
-local function drawConfig()
+local function drawOutputScreen(inputSide)
     clearScreen()
 
-    local w, h = screenSize()
+    center(2, "ROUTE CONFIGURATION", colors.white)
+    center(3, "INPUT: " .. string.upper(inputSide), colors.gray)
+
+    separator(5)
+
+    local y = 7
+
+    for i = 1, #SIDES do
+        local output = SIDES[i]
+
+        local state = false
+
+        if workingConfig.routes[inputSide] then
+            state = workingConfig.routes[inputSide][output] == true
+        end
+
+        local text
+
+        if output == inputSide then
+            text = string.upper(output) .. "    [INPUT]"
+        elseif state then
+            text = string.upper(output) .. "    [ON]"
+        else
+            text = string.upper(output) .. "    [OFF]"
+        end
+
+        menuLine(y, text, i == outputSelection)
+
+        y = y + 1
+    end
+
+    separator(y + 1)
+
+    center(y + 3, "LEFT / RIGHT  CHANGE", colors.gray)
+    center(y + 4, "UP / DOWN  SELECT", colors.gray)
+    center(y + 5, "ENTER  RETURN", colors.gray)
+    center(y + 6, "ESC  CANCEL", colors.gray)
+end
+
+local function outputScreen(inputSide)
+    outputSelection = 1
+
+    while true do
+        drawOutputScreen(inputSide)
+
+        local event, key = os.pullEvent("key")
+
+        if key == keys.up then
+            outputSelection = outputSelection - 1
+
+            if outputSelection < 1 then
+                outputSelection = #SIDES
+            end
+
+        elseif key == keys.down then
+            outputSelection = outputSelection + 1
+
+            if outputSelection > #SIDES then
+                outputSelection = 1
+            end
+
+        elseif key == keys.left or key == keys.right then
+            local output = SIDES[outputSelection]
+
+            if output ~= inputSide then
+                if not workingConfig.routes[inputSide] then
+                    workingConfig.routes[inputSide] = {}
+                end
+
+                if workingConfig.routes[inputSide][output] then
+                    workingConfig.routes[inputSide][output] = nil
+                else
+                    workingConfig.routes[inputSide][output] = true
+                end
+            end
+
+        elseif key == keys.enter then
+            return
+
+        elseif key == keys.escape then
+            return
+        end
+    end
+end
+
+--------------------------------------------------
+-- ROUTE SCREEN
+--------------------------------------------------
+
+local function routeOutputCount(inputSide)
+    local count = 0
+
+    if workingConfig.routes[inputSide] then
+        for i = 1, #SIDES do
+            if workingConfig.routes[inputSide][SIDES[i]] then
+                count = count + 1
+            end
+        end
+    end
+
+    return count
+end
+
+local function drawRouteScreen()
+    clearScreen()
+
+    center(2, "ROUTE CONFIGURATION", colors.white)
+    center(3, "SELECT INPUT SOURCE", colors.gray)
+
+    separator(5)
+
+    local y = 7
+
+    for i = 1, #SIDES do
+        local input = SIDES[i]
+        local count = routeOutputCount(input)
+
+        local text = string.upper(input) .. "    OUTPUTS: " .. tostring(count)
+
+        menuLine(y, text, i == configSelection)
+
+        y = y + 1
+    end
+
+    separator(y + 1)
+
+    center(y + 3, "ENTER  CONFIGURE OUTPUTS", colors.gray)
+    center(y + 4, "ESC  RETURN", colors.gray)
+end
+
+local function routeScreen()
+    configSelection = 1
+
+    while true do
+        drawRouteScreen()
+
+        local event, key = os.pullEvent("key")
+
+        if key == keys.up then
+            configSelection = configSelection - 1
+
+            if configSelection < 1 then
+                configSelection = #SIDES
+            end
+
+        elseif key == keys.down then
+            configSelection = configSelection + 1
+
+            if configSelection > #SIDES then
+                configSelection = 1
+            end
+
+        elseif key == keys.enter then
+            local inputSide = SIDES[configSelection]
+
+            outputScreen(inputSide)
+
+        elseif key == keys.escape then
+            return
+        end
+    end
+end
+
+--------------------------------------------------
+-- CONFIGURATION SCREEN
+--------------------------------------------------
+
+local function drawConfiguration()
+    clearScreen()
 
     center(2, "REDSTONE COMMUNICATIONS", colors.white)
     center(3, "CONFIGURATION", colors.gray)
 
-    line(5, colors.gray)
+    separator(5)
 
-    local keyText = config.key
+    local keyText = workingConfig.key
 
     if keyText == "" then
         keyText = "NOT SET"
     end
 
-    box(7, "KEY       " .. keyText, selected == 1)
-    box(9, "INPUT     < " .. config.input .. " >", selected == 2)
-    box(11, "OUTPUT    < " .. config.output .. " >", selected == 3)
+    menuLine(7, "KEY       " .. keyText, configSelection == 1)
 
-    line(13, colors.gray)
+    local totalRoutes = 0
 
-    local state = redstone.getInput(config.input)
-
-    if state then
-        center(15, "INPUT SIGNAL   ON", colors.white)
-    else
-        center(15, "INPUT SIGNAL   OFF", colors.gray)
+    for i = 1, #SIDES do
+        if routeOutputCount(SIDES[i]) > 0 then
+            totalRoutes = totalRoutes + 1
+        end
     end
 
-    box(17, "RESET CONFIGURATION", selected == 4)
+    menuLine(
+        9,
+        "ROUTES    " .. tostring(totalRoutes) .. " INPUTS",
+        configSelection == 2
+    )
 
-    if h >= 20 then
-        center(h - 2, "UP / DOWN  SELECT", colors.gray)
-        center(h - 1, "LEFT / RIGHT  CHANGE   ENTER  OPEN", colors.gray)
-    else
-        center(h - 1, "UP DOWN SELECT | LEFT RIGHT CHANGE | ENTER", colors.gray)
-    end
+    separator(11)
+
+    menuLine(13, "SAVE & EXIT", configSelection == 3)
+    menuLine(15, "RESET", configSelection == 4)
+    menuLine(17, "CANCEL", configSelection == 5)
+
+    center(19, "UP / DOWN  SELECT", colors.gray)
+    center(20, "ENTER  OPEN / CONFIRM", colors.gray)
+    center(21, "ESC  CANCEL", colors.gray)
 end
 
 local function configurationScreen()
+    workingConfig = copyTable(config)
+
+    configSelection = 1
+
     configOpen = true
-    selected = 1
 
     while configOpen do
-        drawConfig()
+        drawConfiguration()
 
         local event, key = os.pullEvent("key")
 
         if key == keys.up then
-            selected = selected - 1
+            configSelection = configSelection - 1
 
-            if selected < 1 then
-                selected = 4
+            if configSelection < 1 then
+                configSelection = #configItems
             end
 
         elseif key == keys.down then
-            selected = selected + 1
+            configSelection = configSelection + 1
 
-            if selected > 4 then
-                selected = 1
-            end
-
-        elseif key == keys.left then
-
-            if selected == 2 then
-                changeInput(-1)
-
-            elseif selected == 3 then
-                changeOutput(-1)
-            end
-
-        elseif key == keys.right then
-
-            if selected == 2 then
-                changeInput(1)
-
-            elseif selected == 3 then
-                changeOutput(1)
+            if configSelection > #configItems then
+                configSelection = 1
             end
 
         elseif key == keys.enter then
 
-            if selected == 1 then
+            if configSelection == 1 then
                 keyInputScreen()
 
-            elseif selected == 4 then
+            elseif configSelection == 2 then
+                routeScreen()
+
+            elseif configSelection == 3 then
+                config = copyTable(workingConfig)
+
+                normalizeConfig()
+                saveConfig()
+
+                workingConfig = nil
+                configOpen = false
+
+            elseif configSelection == 4 then
                 resetConfig()
+
+                workingConfig = copyTable(config)
+
+            elseif configSelection == 5 then
+                workingConfig = nil
+                configOpen = false
             end
 
         elseif key == keys.escape then
+            workingConfig = nil
             configOpen = false
         end
     end
 end
 
 --------------------------------------------------
--- MAIN SCREEN
+-- COMMUNICATION STATE
 --------------------------------------------------
 
-local function drawMain()
-    clearScreen()
+local function ensureRemote(sender)
+    if not remoteStates[sender] then
+        remoteStates[sender] = {}
 
-    local w, h = screenSize()
+        for i = 1, #SIDES do
+            remoteStates[sender][SIDES[i]] = false
+        end
+    end
+end
 
-    center(2, "REDSTONE COMMUNICATIONS", colors.white)
-    center(3, "LEVEL SYSTEM", colors.gray)
-
-    line(5, colors.gray)
-
-    local keyState = "NOT SET"
-
-    if config.key ~= "" then
-        keyState = "CONFIGURED"
+local function setSourceState(sender, inputSide, state)
+    if not sideExists(inputSide) then
+        return
     end
 
-    center(7, "COMMUNICATION", colors.gray)
-    center(8, keyState, colors.white)
-
-    center(10, "INPUT", colors.gray)
-    center(11, config.input, colors.white)
-
-    center(13, "OUTPUT", colors.gray)
-    center(14, config.output, colors.white)
-
-    local inputState = redstone.getInput(config.input)
-
-    if inputState then
-        center(16, "SIGNAL  ON", colors.white)
-    else
-        center(16, "SIGNAL  OFF", colors.gray)
+    if sender == "local" then
+        localStates[inputSide] = state
+        return
     end
 
-    line(18, colors.gray)
+    ensureRemote(sender)
 
-    if h >= 21 then
-        center(h - 2, "C  CONFIGURATION", colors.white)
-        center(h - 1, "Q  EXIT", colors.gray)
-    else
-        center(h - 1, "C CONFIGURATION   Q EXIT", colors.gray)
+    remoteStates[sender][inputSide] = state
+end
+
+local function inputIsActive(inputSide)
+    if localStates[inputSide] == true then
+        return true
+    end
+
+    for sender, states in pairs(remoteStates) do
+        if states[inputSide] == true then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function calculateOutput(outputSide)
+    for i = 1, #SIDES do
+        local inputSide = SIDES[i]
+
+        if workingConfig == nil then
+            if config.routes[inputSide]
+            and config.routes[inputSide][outputSide]
+            and inputIsActive(inputSide) then
+                return true
+            end
+        else
+            if config.routes[inputSide]
+            and config.routes[inputSide][outputSide]
+            and inputIsActive(inputSide) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function updateOutputs()
+    for i = 1, #SIDES do
+        local output = SIDES[i]
+
+        local active = calculateOutput(output)
+
+        outputStates[output] = active
+
+        if active then
+            redstone.setAnalogOutput(output, 15)
+        else
+            redstone.setAnalogOutput(output, 0)
+        end
     end
 end
 
 --------------------------------------------------
--- COMMUNICATION
+-- TRANSMISSION
 --------------------------------------------------
 
-local function transmitState(state)
+local function transmitInput(inputSide, state)
     if config.key == "" then
         return
     end
@@ -516,27 +773,68 @@ local function transmitState(state)
         CHANNEL,
         {
             protocol = PROTOCOL,
+            version = VERSION,
             key = config.key,
+            sender = COMPUTER_ID,
+            input = inputSide,
             state = state
         }
     )
 end
 
+local function transmitAllLocalStates()
+    if config.key == "" then
+        return
+    end
+
+    for i = 1, #SIDES do
+        local inputSide = SIDES[i]
+        local state = redstone.getInput(inputSide)
+
+        localStates[inputSide] = state
+
+        transmitInput(inputSide, state)
+    end
+end
+
+--------------------------------------------------
+-- INPUT TASK
+--------------------------------------------------
+
 local function inputTask()
-    local lastState = redstone.getInput(config.input)
+    for i = 1, #SIDES do
+        local side = SIDES[i]
+
+        localStates[side] = redstone.getInput(side)
+    end
+
+    updateOutputs()
+
+    transmitAllLocalStates()
 
     while running do
-        local currentState = redstone.getInput(config.input)
+        for i = 1, #SIDES do
+            local side = SIDES[i]
 
-        if currentState ~= lastState then
-            lastState = currentState
+            local current = redstone.getInput(side)
+            local previous = localStates[side]
 
-            transmitState(currentState)
+            if current ~= previous then
+                localStates[side] = current
+
+                updateOutputs()
+
+                transmitInput(side, current)
+            end
         end
 
         sleep(0.05)
     end
 end
+
+--------------------------------------------------
+-- RECEIVE TASK
+--------------------------------------------------
 
 local function receiveTask()
     modem.open(CHANNEL)
@@ -549,34 +847,92 @@ local function receiveTask()
               message,
               distance = os.pullEvent("modem_message")
 
-        if channel == CHANNEL then
+        if channel == CHANNEL
+        and type(message) == "table"
+        and message.protocol == PROTOCOL
+        and message.version == VERSION
+        and type(message.key) == "string"
+        and message.key == config.key
+        and type(message.sender) == "number"
+        and message.sender ~= COMPUTER_ID
+        and type(message.input) == "string"
+        and sideExists(message.input)
+        and type(message.state) == "boolean" then
 
-            if type(message) == "table" then
+            setSourceState(
+                tostring(message.sender),
+                message.input,
+                message.state
+            )
 
-                if message.protocol == PROTOCOL then
-
-                    if config.key ~= ""
-                    and message.key == config.key then
-
-                        if message.state == true then
-
-                            redstone.setAnalogOutput(
-                                config.output,
-                                15
-                            )
-
-                        elseif message.state == false then
-
-                            redstone.setAnalogOutput(
-                                config.output,
-                                0
-                            )
-                        end
-                    end
-                end
-            end
+            updateOutputs()
         end
     end
+end
+
+--------------------------------------------------
+-- MAIN SCREEN
+--------------------------------------------------
+
+local function getActiveInputText()
+    local active = {}
+
+    for i = 1, #SIDES do
+        local side = SIDES[i]
+
+        if localStates[side] then
+            table.insert(active, string.upper(side))
+        end
+    end
+
+    if #active == 0 then
+        return "NONE"
+    end
+
+    return table.concat(active, ", ")
+end
+
+local function drawMain()
+    clearScreen()
+
+    local w, h = getScreenSize()
+
+    center(2, "REDSTONE COMMUNICATIONS", colors.white)
+    center(3, "LEVEL SYSTEM", colors.gray)
+
+    separator(5)
+
+    local keyStatus
+
+    if config.key == "" then
+        keyStatus = "NOT SET"
+    else
+        keyStatus = "CONFIGURED"
+    end
+
+    center(7, "COMMUNICATION", colors.gray)
+    center(8, keyStatus, colors.white)
+
+    center(10, "COMPUTER ID", colors.gray)
+    center(11, tostring(COMPUTER_ID), colors.white)
+
+    center(13, "LOCAL INPUT", colors.gray)
+    center(14, getActiveInputText(), colors.white)
+
+    center(16, "ROUTES", colors.gray)
+
+    local routeCount = 0
+
+    for i = 1, #SIDES do
+        routeCount = routeCount + routeOutputCount(SIDES[i])
+    end
+
+    center(17, tostring(routeCount) .. " CONNECTIONS", colors.white)
+
+    separator(19)
+
+    center(h - 2, "C  CONFIGURATION", colors.white)
+    center(h - 1, "Q  EXIT", colors.gray)
 end
 
 --------------------------------------------------
@@ -585,7 +941,6 @@ end
 
 local function guiTask()
     while running do
-
         if not configOpen then
             drawMain()
 
@@ -593,6 +948,8 @@ local function guiTask()
 
             if key == keys.c then
                 configurationScreen()
+
+                updateOutputs()
 
             elseif key == keys.q then
                 running = false
@@ -609,7 +966,14 @@ end
 
 loadConfig()
 
-redstone.setAnalogOutput(config.output, 0)
+for i = 1, #SIDES do
+    local side = SIDES[i]
+
+    localStates[side] = false
+    outputStates[side] = false
+
+    redstone.setAnalogOutput(side, 0)
+end
 
 parallel.waitForAny(
     inputTask,
@@ -617,7 +981,11 @@ parallel.waitForAny(
     guiTask
 )
 
-redstone.setAnalogOutput(config.output, 0)
+running = false
+
+for i = 1, #SIDES do
+    redstone.setAnalogOutput(SIDES[i], 0)
+end
 
 term.setBackgroundColor(colors.black)
 term.setTextColor(colors.white)
