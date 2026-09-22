@@ -2,7 +2,7 @@ local CONFIG_FILE = "redstone_communications.cfg"
 
 local CHANNEL = 48173
 local PROTOCOL = "Redstone Communications"
-local VERSION = 1
+local VERSION = 2
 
 local SIDES = {
     "top",
@@ -34,10 +34,6 @@ end
 
 local COMPUTER_ID = os.getComputerID()
 
---------------------------------------------------
--- RUNTIME CONFIGURATION
---------------------------------------------------
-
 local config = {
     key = "",
     routes = {
@@ -50,28 +46,14 @@ local config = {
     }
 }
 
---------------------------------------------------
--- TEMPORARY CONFIGURATION
---------------------------------------------------
-
 local workingConfig = nil
-
---------------------------------------------------
--- RUNTIME STATE
---------------------------------------------------
 
 local running = true
 local configOpen = false
 
 local localStates = {}
-
 local remoteStates = {}
-
 local outputStates = {}
-
---------------------------------------------------
--- UI STATE
---------------------------------------------------
 
 local configSelection = 1
 local routeSelection = 1
@@ -83,7 +65,6 @@ local outputSelection = 1
 
 local function copyTable(value)
     local serialized = textutils.serialize(value)
-
     return textutils.unserialize(serialized)
 end
 
@@ -95,16 +76,6 @@ local function isValidSide(side)
     end
 
     return false
-end
-
-local function getSideIndex(side)
-    for i = 1, #SIDES do
-        if SIDES[i] == side then
-            return i
-        end
-    end
-
-    return 1
 end
 
 local function getScreenSize()
@@ -122,8 +93,19 @@ local function getScreenSize()
 end
 
 --------------------------------------------------
--- CONFIG NORMALIZATION
+-- CONFIG
 --------------------------------------------------
+
+local function createEmptyRoutes()
+    return {
+        top = {},
+        bottom = {},
+        left = {},
+        right = {},
+        front = {},
+        back = {}
+    }
+end
 
 local function normalizeConfig(target)
     if type(target) ~= "table" then
@@ -135,7 +117,7 @@ local function normalizeConfig(target)
     end
 
     if type(target.routes) ~= "table" then
-        target.routes = {}
+        target.routes = createEmptyRoutes()
     end
 
     for i = 1, #SIDES do
@@ -150,9 +132,7 @@ local function normalizeConfig(target)
         for j = 1, #SIDES do
             local outputSide = SIDES[j]
 
-            if outputSide ~= inputSide
-            and target.routes[inputSide][outputSide] == true then
-
+            if target.routes[inputSide][outputSide] == true then
                 clean[outputSide] = true
             end
         end
@@ -160,10 +140,6 @@ local function normalizeConfig(target)
         target.routes[inputSide] = clean
     end
 end
-
---------------------------------------------------
--- SAVE / LOAD
---------------------------------------------------
 
 local function saveConfig()
     normalizeConfig(config)
@@ -196,11 +172,11 @@ local function loadConfig()
 
     if not file then
         normalizeConfig(config)
+        saveConfig()
         return
     end
 
     local data = file.readAll()
-
     file.close()
 
     local ok, result = pcall(
@@ -208,25 +184,36 @@ local function loadConfig()
         data
     )
 
-    if ok and type(result) == "table" then
+    if not ok or type(result) ~= "table" then
+        config = {
+            key = "",
+            routes = createEmptyRoutes()
+        }
+
+        saveConfig()
+        return
+    end
+
+    if type(result.key) == "string" then
         config.key = result.key
+    else
+        config.key = ""
+    end
+
+    if type(result.routes) == "table" then
         config.routes = result.routes
+    else
+        config.routes = createEmptyRoutes()
     end
 
     normalizeConfig(config)
+    saveConfig()
 end
 
 local function resetConfig()
     config = {
         key = "",
-        routes = {
-            top = {},
-            bottom = {},
-            left = {},
-            right = {},
-            front = {},
-            back = {}
-        }
+        routes = createEmptyRoutes()
     }
 end
 
@@ -237,7 +224,6 @@ end
 local function clearScreen()
     term.setBackgroundColor(colors.black)
     term.setTextColor(colors.white)
-
     term.clear()
     term.setCursorPos(1, 1)
 end
@@ -343,7 +329,9 @@ local function getRouteCount(target, inputSide)
         return 0
     end
 
-    if type(target.routes[inputSide]) ~= "table" then
+    local routes = target.routes[inputSide]
+
+    if type(routes) ~= "table" then
         return 0
     end
 
@@ -352,7 +340,7 @@ local function getRouteCount(target, inputSide)
     for i = 1, #SIDES do
         local outputSide = SIDES[i]
 
-        if target.routes[inputSide][outputSide] == true then
+        if routes[outputSide] == true then
             count = count + 1
         end
     end
@@ -384,7 +372,7 @@ end
 local function keyInputScreen()
     clearScreen()
 
-    local w, h = getScreenSize()
+    local w = getScreenSize()
 
     center(
         3,
@@ -491,7 +479,6 @@ local function keyInputScreen()
             elseif input == keys.enter then
 
                 workingConfig.key = value
-
                 term.setCursorBlink(false)
 
                 return
@@ -507,7 +494,7 @@ local function keyInputScreen()
 end
 
 --------------------------------------------------
--- OUTPUT CONFIGURATION
+-- OUTPUT ROUTE SCREEN
 --------------------------------------------------
 
 local function drawOutputScreen(inputSide)
@@ -515,7 +502,7 @@ local function drawOutputScreen(inputSide)
 
     center(
         2,
-        "ROUTE CONFIGURATION",
+        "ROUTE SETTING",
         colors.white
     )
 
@@ -532,31 +519,28 @@ local function drawOutputScreen(inputSide)
     for i = 1, #SIDES do
         local outputSide = SIDES[i]
 
+        local enabled = false
+
+        if type(
+            workingConfig.routes[inputSide]
+        ) == "table" then
+
+            enabled =
+                workingConfig
+                .routes[inputSide]
+                [outputSide] == true
+        end
+
         local text
 
-        if outputSide == inputSide then
+        if enabled then
             text =
                 string.upper(outputSide)
-                .. "    [INPUT]"
+                .. "    [ON]"
         else
-            local enabled = false
-
-            if workingConfig.routes[inputSide] then
-                enabled =
-                    workingConfig
-                    .routes[inputSide]
-                    [outputSide] == true
-            end
-
-            if enabled then
-                text =
-                    string.upper(outputSide)
-                    .. "    [ON]"
-            else
-                text =
-                    string.upper(outputSide)
-                    .. "    [OFF]"
-            end
+            text =
+                string.upper(outputSide)
+                .. "    [OFF]"
         end
 
         menuLine(
@@ -572,8 +556,8 @@ local function drawOutputScreen(inputSide)
 
     center(
         y + 3,
-        "LEFT / RIGHT  TOGGLE",
-        colors.gray
+        "ENTER  ASSIGN / REMOVE",
+        colors.white
     )
 
     center(
@@ -584,13 +568,7 @@ local function drawOutputScreen(inputSide)
 
     center(
         y + 5,
-        "ENTER  RETURN",
-        colors.gray
-    )
-
-    center(
-        y + 6,
-        "ESC  RETURN",
+        "BACKSPACE / ESC  RETURN",
         colors.gray
     )
 end
@@ -599,9 +577,11 @@ local function outputScreen(inputSide)
     outputSelection = 1
 
     while true do
+
         drawOutputScreen(inputSide)
 
-        local event, key = os.pullEvent("key")
+        local event, key =
+            os.pullEvent("key")
 
         if key == keys.up then
 
@@ -621,43 +601,38 @@ local function outputScreen(inputSide)
                 outputSelection = 1
             end
 
-        elseif key == keys.left
-        or key == keys.right then
+        elseif key == keys.enter then
 
             local outputSide =
                 SIDES[outputSelection]
 
-            if outputSide ~= inputSide then
+            if type(
+                workingConfig.routes[inputSide]
+            ) ~= "table" then
 
-                if type(
-                    workingConfig.routes[inputSide]
-                ) ~= "table" then
-
-                    workingConfig.routes[inputSide] = {}
-                end
-
-                local current =
-                    workingConfig
-                    .routes[inputSide]
-                    [outputSide] == true
-
-                workingConfig
-                    .routes[inputSide]
-                    [outputSide] =
-                    not current
+                workingConfig.routes[inputSide] = {}
             end
 
-        elseif key == keys.enter then
-            return
+            local current =
+                workingConfig
+                .routes[inputSide]
+                [outputSide] == true
 
-        elseif key == keys.escape then
+            workingConfig
+                .routes[inputSide]
+                [outputSide] =
+                not current
+
+        elseif key == keys.backspace
+        or key == keys.escape then
+
             return
         end
     end
 end
 
 --------------------------------------------------
--- ROUTE SCREEN
+-- ROUTE INPUT SCREEN
 --------------------------------------------------
 
 local function drawRouteScreen()
@@ -665,13 +640,13 @@ local function drawRouteScreen()
 
     center(
         2,
-        "ROUTE CONFIGURATION",
+        "ROUTE SETTING",
         colors.white
     )
 
     center(
         3,
-        "SELECT INPUT SOURCE",
+        "SELECT INPUT",
         colors.gray
     )
 
@@ -680,6 +655,7 @@ local function drawRouteScreen()
     local y = 7
 
     for i = 1, #SIDES do
+
         local inputSide = SIDES[i]
 
         local count =
@@ -706,13 +682,19 @@ local function drawRouteScreen()
 
     center(
         y + 3,
-        "ENTER  CONFIGURE OUTPUTS",
-        colors.gray
+        "ENTER  OPEN OUTPUTS",
+        colors.white
     )
 
     center(
         y + 4,
-        "ESC  RETURN",
+        "UP / DOWN  SELECT",
+        colors.gray
+    )
+
+    center(
+        y + 5,
+        "BACKSPACE / ESC  RETURN",
         colors.gray
     )
 end
@@ -721,6 +703,7 @@ local function routeScreen()
     routeSelection = 1
 
     while true do
+
         drawRouteScreen()
 
         local event, key =
@@ -751,14 +734,16 @@ local function routeScreen()
 
             outputScreen(inputSide)
 
-        elseif key == keys.escape then
+        elseif key == keys.backspace
+        or key == keys.escape then
+
             return
         end
     end
 end
 
 --------------------------------------------------
--- CONFIGURATION SCREEN
+-- CONFIGURATION
 --------------------------------------------------
 
 local function drawConfiguration()
@@ -867,8 +852,7 @@ local function configurationScreen()
                 configSelection - 1
 
             if configSelection < 1 then
-                configSelection =
-                    5
+                configSelection = 5
             end
 
         elseif key == keys.down then
@@ -898,11 +882,9 @@ local function configurationScreen()
                     )
 
                 normalizeConfig(config)
-
                 saveConfig()
 
                 workingConfig = nil
-
                 configOpen = false
 
             elseif configSelection == 4 then
@@ -919,14 +901,12 @@ local function configurationScreen()
             elseif configSelection == 5 then
 
                 workingConfig = nil
-
                 configOpen = false
             end
 
         elseif key == keys.escape then
 
             workingConfig = nil
-
             configOpen = false
         end
     end
@@ -979,13 +959,15 @@ local function isInputActive(inputSide)
 end
 
 --------------------------------------------------
--- OUTPUT CALCULATION
+-- OUTPUT
 --------------------------------------------------
 
 local function shouldOutput(outputSide)
+
     for i = 1, #SIDES do
 
-        local inputSide = SIDES[i]
+        local inputSide =
+            SIDES[i]
 
         local routes =
             config.routes[inputSide]
@@ -1005,14 +987,14 @@ local function shouldOutput(outputSide)
 end
 
 local function updateOutputs()
+
     for i = 1, #SIDES do
 
-        local outputSide = SIDES[i]
+        local outputSide =
+            SIDES[i]
 
         local active =
-            shouldOutput(
-                outputSide
-            )
+            shouldOutput(outputSide)
 
         outputStates[outputSide] =
             active
@@ -1062,14 +1044,15 @@ local function transmitState(
 end
 
 --------------------------------------------------
--- INPUT TASK
+-- INPUT
 --------------------------------------------------
 
 local function inputTask()
 
     for i = 1, #SIDES do
 
-        local side = SIDES[i]
+        local side =
+            SIDES[i]
 
         localStates[side] =
             redstone.getInput(side)
@@ -1081,7 +1064,8 @@ local function inputTask()
 
         for i = 1, #SIDES do
 
-            local side = SIDES[i]
+            local side =
+                SIDES[i]
 
             local current =
                 redstone.getInput(side)
@@ -1108,7 +1092,7 @@ local function inputTask()
 end
 
 --------------------------------------------------
--- RECEIVE TASK
+-- RECEIVE
 --------------------------------------------------
 
 local function receiveTask()
@@ -1151,7 +1135,7 @@ local function receiveTask()
 end
 
 --------------------------------------------------
--- MAIN SCREEN
+-- MAIN
 --------------------------------------------------
 
 local function getLocalInputText()
@@ -1159,9 +1143,11 @@ local function getLocalInputText()
 
     for i = 1, #SIDES do
 
-        local side = SIDES[i]
+        local side =
+            SIDES[i]
 
         if localStates[side] then
+
             table.insert(
                 active,
                 string.upper(side)
@@ -1180,6 +1166,7 @@ local function getLocalInputText()
 end
 
 local function drawMain()
+
     clearScreen()
 
     local w, h =
@@ -1284,10 +1271,6 @@ local function drawMain()
     end
 end
 
---------------------------------------------------
--- GUI TASK
---------------------------------------------------
-
 local function guiTask()
 
     while running do
@@ -1323,7 +1306,8 @@ loadConfig()
 
 for i = 1, #SIDES do
 
-    local side = SIDES[i]
+    local side =
+        SIDES[i]
 
     localStates[side] = false
     outputStates[side] = false
